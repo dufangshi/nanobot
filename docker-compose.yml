@@ -4,6 +4,7 @@ x-common-config: &common-config
     dockerfile: Dockerfile
   volumes:
     - ~/.nanobot:/root/.nanobot
+    - ~/.codex:/root/.codex
     - /opt/orchestration-mcp:/opt/orchestration-mcp:ro
   extra_hosts:
     - "host.docker.internal:host-gateway"
