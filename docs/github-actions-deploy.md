@@ -23,6 +23,18 @@ git push origin prod
 
 Pushing to `prod` triggers `.github/workflows/deploy.yml`.
 
+## Automated Server Setup
+
+Run this once on the server:
+
+```bash
+wget https://raw.githubusercontent.com/dufangshi/nanobot/prod/deploy_setup.sh
+chmod +x deploy_setup.sh
+sudo ./deploy_setup.sh
+```
+
+The script installs Docker/Git, generates both SSH key pairs, initializes the deployment directory, creates `~/.nanobot`, and prints everything you need to paste into GitHub.
+
 ## GitHub Secrets
 
 Add these repository secrets in GitHub:
@@ -33,29 +45,28 @@ Add these repository secrets in GitHub:
 - `DEPLOY_PATH`: deployment path on server, for example `/opt/nanobot`
 - `DEPLOY_SSH_KEY`: private key used by GitHub Actions to SSH into the server
 
-## Server Bootstrap
+The setup script also prints a GitHub deploy key for server-side `git fetch` / `git pull`.
 
-Run once on the server:
+## First Deployment
 
-```bash
-mkdir -p /opt/nanobot
-git clone -b prod https://github.com/dufangshi/nanobot.git /opt/nanobot
-cd /opt/nanobot
+After adding the deploy key and Actions secrets, trigger the workflow by pushing to `prod` or running it manually from GitHub Actions.
 
-mkdir -p ~/.nanobot
-docker compose run --rm nanobot-cli onboard
-```
+On first deployment, the workflow will:
 
-Then edit the server-side config:
+- fetch the repo into the prepared server path
+- auto-run `nanobot onboard` if `~/.nanobot/config.json` does not exist
+- build and start `nanobot-gateway`
+
+Then review and edit the server-side config:
 
 ```bash
 vim ~/.nanobot/config.json
+docker compose -f /opt/nanobot/docker-compose.yml restart nanobot-gateway
 ```
-
-After that, the workflow can update and restart the gateway automatically.
 
 ## Notes
 
 - Runtime secrets stay on the server in `~/.nanobot/config.json`; do not commit them.
 - The deploy workflow assumes Docker and Docker Compose are already installed on the server.
 - If you also want to deploy custom sidecars like `orchestration-mcp`, add them to the server compose stack before enabling auto deploy.
+- The server setup script is [`deploy_setup.sh`](/Users/fonsh/PycharmProjects/Treer/nanobot/deploy_setup.sh).

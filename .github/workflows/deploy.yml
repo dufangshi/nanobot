@@ -37,9 +37,13 @@ jobs:
           ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" <<EOF
           set -euo pipefail
           cd "${DEPLOY_PATH}"
-          git fetch origin
-          git checkout prod
-          git pull --ff-only origin prod
+          git config --global --add safe.directory "${DEPLOY_PATH}"
+          git fetch origin prod
+          git checkout -B prod origin/prod
+          mkdir -p "\$HOME/.nanobot"
+          if [ ! -f "\$HOME/.nanobot/config.json" ]; then
+            docker compose run --rm nanobot-cli onboard
+          fi
           docker compose up -d --build nanobot-gateway
           docker compose ps
           EOF
