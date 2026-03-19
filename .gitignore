@@ -2,6 +2,11 @@
 .assets
 .docs
 .env
+.env.*
+.DS_Store
+
+# Python
+__pycache__/
 *.pyc
 dist/
 build/
@@ -16,10 +21,20 @@ build/
 *.pyzz
 .venv/
 venv/
-__pycache__/
 poetry.lock
 .pytest_cache/
+
+# Build outputs
+*.tsbuildinfo
+
+# Node / TypeScript subpackages
+node_modules/
+
+# Local runtime artifacts
+.nanobot-orchestrator/
 botpy.log
 nano.*.save
-.DS_Store
 uv.lock
+
+# Nested standalone project
+/orchestration-mcp/
