@@ -4,6 +4,8 @@ x-common-config: &common-config
     dockerfile: Dockerfile
   volumes:
     - ~/.nanobot:/root/.nanobot
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
 
 services:
   nanobot-gateway:
