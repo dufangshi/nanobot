@@ -188,3 +188,13 @@ async def test_preflight_consolidation_before_llm_call(tmp_path, monkeypatch) ->
     assert "consolidate" in order
     assert "llm" in order
     assert order.index("consolidate") < order.index("llm")
+
+
+@pytest.mark.asyncio
+async def test_process_direct_passes_session_key_to_provider(tmp_path) -> None:
+    loop = _make_loop(tmp_path, estimated_tokens=100, context_window_tokens=200)
+
+    await loop.process_direct("hello", session_key="cli:test-session")
+
+    _, kwargs = loop.provider.chat_with_retry.await_args
+    assert kwargs["session_key"] == "cli:test-session"

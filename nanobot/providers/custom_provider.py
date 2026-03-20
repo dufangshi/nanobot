@@ -12,6 +12,7 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
 class CustomProvider(LLMProvider):
+    _SESSION_HEADER_NAME = "x-nanobot-session-key"
 
     def __init__(
         self,
@@ -37,13 +38,20 @@ class CustomProvider(LLMProvider):
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                    model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7,
                    reasoning_effort: str | None = None,
-                   tool_choice: str | dict[str, Any] | None = None) -> LLMResponse:
+                   tool_choice: str | dict[str, Any] | None = None,
+                   session_key: str | None = None) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
             "messages": self._sanitize_empty_content(messages),
             "max_tokens": max(1, max_tokens),
             "temperature": temperature,
         }
+        if session_key and session_key.strip():
+            normalized_session_key = session_key.strip()
+            kwargs["extra_headers"] = {
+                self._SESSION_HEADER_NAME: normalized_session_key,
+            }
+            kwargs["user"] = f"nanobot:{normalized_session_key}"
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         if tools:
@@ -75,4 +83,3 @@ class CustomProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return self.default_model
-
