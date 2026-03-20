@@ -12,6 +12,8 @@ x-common-config: &common-config
     - ~/.nanobot:/root/.nanobot
     - ~/.codex:/root/.codex
     - ~/.local:/root/.local
+    - /mnt/gdrive-ai:/mnt/gdrive-ai:rw
+    - /mnt/gdrive-ai:/home/ubuntu/mnt/gdrive-ai:rw
     - /opt/orchestration-mcp:/opt/orchestration-mcp:ro
   extra_hosts:
     - "host.docker.internal:host-gateway"
