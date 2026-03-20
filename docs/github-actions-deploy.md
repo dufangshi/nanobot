@@ -64,6 +64,8 @@ vim ~/.nanobot/config.json
 docker compose -f /opt/nanobot/docker-compose.yml restart nanobot-gateway
 ```
 
+If you use an external `orchestration-mcp` sidecar with `claude_code` from the Dockerized gateway, add `CLAUDE_CODE_BUBBLEWRAP=1` to the server `.env` and also pass the same variable in `~/.nanobot/config.json` under `tools.mcpServers.orchestration-mcp.env`. This keeps Claude Code permission bypass available when the gateway container runs as `root`.
+
 ## Notes
 
 - Runtime secrets stay on the server in `~/.nanobot/config.json`; do not commit them.

@@ -2,9 +2,16 @@ x-common-config: &common-config
   build:
     context: .
     dockerfile: Dockerfile
+  environment:
+    PATH: /root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+    ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+    CLAUDE_CODE_BUBBLEWRAP: ${CLAUDE_CODE_BUBBLEWRAP:-}
   volumes:
     - ~/.nanobot:/root/.nanobot
     - ~/.codex:/root/.codex
+    - ~/.local:/root/.local
     - /opt/orchestration-mcp:/opt/orchestration-mcp:ro
   extra_hosts:
     - "host.docker.internal:host-gateway"
