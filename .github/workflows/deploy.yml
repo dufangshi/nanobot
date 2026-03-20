@@ -6,6 +6,10 @@ on:
       - prod
   workflow_dispatch:
 
+concurrency:
+  group: nanobot-prod-deploy
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -38,8 +42,8 @@ jobs:
           set -euo pipefail
           cd "${DEPLOY_PATH}"
           git config --global --add safe.directory "${DEPLOY_PATH}"
-          git fetch origin prod
-          git checkout -f -B prod origin/prod
+          git fetch origin +refs/heads/prod:refs/nanobot/deploy-prod
+          git checkout -f -B prod refs/nanobot/deploy-prod
           git clean -fd
           mkdir -p "\$HOME/.nanobot"
           if [ ! -f "\$HOME/.nanobot/config.json" ]; then
