@@ -39,7 +39,8 @@ jobs:
           cd "${DEPLOY_PATH}"
           git config --global --add safe.directory "${DEPLOY_PATH}"
           git fetch origin prod
-          git checkout -B prod origin/prod
+          git checkout -f -B prod origin/prod
+          git clean -fd
           mkdir -p "\$HOME/.nanobot"
           if [ ! -f "\$HOME/.nanobot/config.json" ]; then
             docker compose run --rm nanobot-cli onboard
