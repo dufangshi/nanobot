@@ -1,7 +1,9 @@
 """Slack channel implementation using Socket Mode."""
 
 import asyncio
+import httpx
 import re
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -16,6 +18,7 @@ from nanobot.bus.queue import MessageBus
 from pydantic import Field
 
 from nanobot.channels.base import BaseChannel
+from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
 
 
@@ -42,6 +45,7 @@ class SlackConfig(Base):
     allow_from: list[str] = Field(default_factory=list)
     group_policy: str = "mention"
     group_allow_from: list[str] = Field(default_factory=list)
+    max_media_bytes: int = 20 * 1024 * 1024
     dm: SlackDMConfig = Field(default_factory=SlackDMConfig)
 
 
@@ -50,6 +54,10 @@ class SlackChannel(BaseChannel):
 
     name = "slack"
     display_name = "Slack"
+    _SUPPORTED_MESSAGE_SUBTYPES = {None, "file_share"}
+    _IMAGE_PREFIX = "image/"
+    _AUDIO_PREFIX = "audio/"
+    _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -172,9 +180,11 @@ class SlackChannel(BaseChannel):
 
         sender_id = event.get("user")
         chat_id = event.get("channel")
+        subtype = event.get("subtype")
 
-        # Ignore bot/system messages (any subtype = not a normal user message)
-        if event.get("subtype"):
+        if subtype not in self._SUPPORTED_MESSAGE_SUBTYPES:
+            return
+        if event.get("bot_id"):
             return
         if self._bot_user_id and sender_id == self._bot_user_id:
             return
@@ -182,7 +192,12 @@ class SlackChannel(BaseChannel):
         # Avoid double-processing: Slack sends both `message` and `app_mention`
         # for mentions in channels. Prefer `app_mention`.
         text = event.get("text") or ""
-        if event_type == "message" and self._bot_user_id and f"<@{self._bot_user_id}>" in text:
+        if (
+            event_type == "message"
+            and subtype is None
+            and self._bot_user_id
+            and f"<@{self._bot_user_id}>" in text
+        ):
             return
 
         # Debug: log basic event shape
@@ -214,6 +229,7 @@ class SlackChannel(BaseChannel):
             return
 
         text = self._strip_bot_mention(text)
+        media_paths, attachment_parts, attachments_meta = await self._collect_inbound_media(event)
 
         if self.config.reply_in_thread and not thread_ts:
             thread_ts = event.get("ts")
@@ -237,18 +253,134 @@ class SlackChannel(BaseChannel):
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=chat_id,
-                content=text,
+                content="\n".join(part for part in [text, *attachment_parts] if part) or "[empty message]",
+                media=media_paths,
                 metadata={
                     "slack": {
                         "event": event,
                         "thread_ts": thread_ts,
                         "channel_type": channel_type,
                     },
+                    "attachments": attachments_meta,
                 },
                 session_key=session_key,
             )
         except Exception:
             logger.exception("Error handling Slack message from {}", sender_id)
+
+    @classmethod
+    def _safe_filename(cls, value: str | None, default: str) -> str:
+        raw = (value or "").strip()
+        if not raw:
+            return default
+        name = Path(raw).name.strip().replace("\x00", "")
+        name = cls._SAFE_NAME_RE.sub("_", name).strip("._")
+        return name or default
+
+    @classmethod
+    def _attachment_mode(cls, file_obj: dict[str, Any]) -> str:
+        mimetype = str(file_obj.get("mimetype") or "").lower()
+        if mimetype.startswith(cls._IMAGE_PREFIX):
+            return "image"
+        if mimetype.startswith(cls._AUDIO_PREFIX):
+            return "audio"
+        return "file"
+
+    async def _resolve_file_object(self, file_obj: dict[str, Any]) -> dict[str, Any] | None:
+        if not self._web_client:
+            return file_obj
+        if file_obj.get("file_access") != "check_file_info":
+            return file_obj
+        file_id = file_obj.get("id")
+        if not file_id:
+            return None
+        try:
+            resp = await self._web_client.files_info(file=file_id)
+        except Exception as e:
+            logger.warning("Slack files.info failed for {}: {}", file_id, e)
+            return None
+        resolved = resp.get("file") if isinstance(resp, dict) else None
+        return resolved if isinstance(resolved, dict) else None
+
+    async def _download_slack_file(
+        self,
+        file_obj: dict[str, Any],
+    ) -> tuple[str | None, str | None, dict[str, Any]]:
+        file_id = str(file_obj.get("id") or "")
+        mode = self._attachment_mode(file_obj)
+        size = int(file_obj.get("size") or 0)
+        filename = self._safe_filename(
+            str(file_obj.get("name") or file_obj.get("title") or ""),
+            f"file_{file_id or 'attachment'}",
+        )
+        meta = {
+            "id": file_id,
+            "name": file_obj.get("name") or filename,
+            "title": file_obj.get("title") or "",
+            "mimetype": file_obj.get("mimetype") or "",
+            "size": size,
+            "path": "",
+            "download_url": file_obj.get("url_private_download") or file_obj.get("url_private") or "",
+            "mode": mode,
+        }
+        limit = max(int(self.config.max_media_bytes), 0)
+        if limit == 0 or (size and size > limit):
+            return None, f"[attachment: {filename} - too large]", meta
+
+        url = meta["download_url"]
+        if not url or not self.config.bot_token:
+            return None, f"[attachment: {filename} - download failed]", meta
+
+        media_dir = get_media_dir("slack")
+        local_name = self._safe_filename(f"{file_id}_{filename}" if file_id else filename, filename)
+        file_path = media_dir / local_name
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {self.config.bot_token}"},
+                    follow_redirects=True,
+                )
+                response.raise_for_status()
+                file_path.write_bytes(response.content)
+        except Exception as e:
+            logger.warning("Failed to download Slack attachment {}: {}", file_id or filename, e)
+            return None, f"[attachment: {filename} - download failed]", meta
+
+        meta["path"] = str(file_path)
+        return str(file_path), f"[attachment: {file_path}]", meta
+
+    async def _collect_inbound_media(
+        self,
+        event: dict[str, Any],
+    ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+        media_paths: list[str] = []
+        content_parts: list[str] = []
+        attachments_meta: list[dict[str, Any]] = []
+
+        for raw_file in event.get("files") or []:
+            if not isinstance(raw_file, dict):
+                continue
+            file_obj = await self._resolve_file_object(raw_file)
+            if not file_obj:
+                fallback_name = self._safe_filename(str(raw_file.get("name") or ""), "attachment")
+                content_parts.append(f"[attachment: {fallback_name} - download failed]")
+                continue
+
+            path, marker, meta = await self._download_slack_file(file_obj)
+            attachments_meta.append(meta)
+            if marker:
+                content_parts.append(marker)
+            if not path:
+                continue
+            media_paths.append(path)
+            if meta["mode"] == "audio":
+                transcription = await self.transcribe_audio(path)
+                if transcription:
+                    content_parts.append(f"[transcription: {transcription}]")
+
+        return media_paths, content_parts, attachments_meta
 
     async def _update_react_emoji(self, chat_id: str, ts: str | None) -> None:
         """Remove the in-progress reaction and optionally add a done reaction."""

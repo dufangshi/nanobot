@@ -657,7 +657,7 @@ Uses **Socket Mode** — no public URL required.
 
 **2. Configure the app**
 - **Socket Mode**: Toggle ON → Generate an **App-Level Token** with `connections:write` scope → copy it (`xapp-...`)
-- **OAuth & Permissions**: Add bot scopes: `chat:write`, `reactions:write`, `app_mentions:read`
+- **OAuth & Permissions**: Add bot scopes: `chat:write`, `reactions:write`, `app_mentions:read`, `files:read`
 - **Event Subscriptions**: Toggle ON → Subscribe to bot events: `message.im`, `message.channels`, `app_mention` → Save Changes
 - **App Home**: Scroll to **Show Tabs** → Enable **Messages Tab** → Check **"Allow users to send Slash commands and messages from the messages tab"**
 - **Install App**: Click **Install to Workspace** → Authorize → copy the **Bot Token** (`xoxb-...`)
@@ -672,7 +672,8 @@ Uses **Socket Mode** — no public URL required.
       "botToken": "xoxb-...",
       "appToken": "xapp-...",
       "allowFrom": ["YOUR_SLACK_USER_ID"],
-      "groupPolicy": "mention"
+      "groupPolicy": "mention",
+      "maxMediaBytes": 20971520
     }
   }
 }
@@ -684,11 +685,12 @@ Uses **Socket Mode** — no public URL required.
 nanobot gateway
 ```
 
-DM the bot directly or @mention it in a channel — it should respond!
+DM the bot directly or @mention it in a channel — it should respond. User-uploaded Slack files are downloaded locally and passed into the agent when `files:read` is enabled.
 
 > [!TIP]
 > - `groupPolicy`: `"mention"` (default — respond only when @mentioned), `"open"` (respond to all channel messages), or `"allowlist"` (restrict to specific channels).
 > - DM policy defaults to open. Set `"dm": {"enabled": false}` to disable DMs.
+> - `maxMediaBytes`: Max inbound attachment size (default `20MB`). Set `0` to block all inbound Slack media.
 
 </details>
 
