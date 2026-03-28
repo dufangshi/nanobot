@@ -380,6 +380,12 @@ class SlackChannel(BaseChannel):
             or host.endswith(".slack-edge.com")
         )
 
+    @staticmethod
+    def _is_workspace_root(url: httpx.URL) -> bool:
+        host = (url.host or "").lower()
+        path = (url.path or "").strip()
+        return host.endswith(".slack.com") and path in ("", "/")
+
     async def _download_bytes_with_redirects(self, url: str) -> tuple[bytes, dict[str, Any]]:
         headers = {"Authorization": f"Bearer {self.config.bot_token}"}
         current = url
@@ -392,6 +398,26 @@ class SlackChannel(BaseChannel):
                     if not location:
                         raise RuntimeError("redirect missing location")
                     next_url = response.url.join(location)
+                    if self._is_workspace_root(next_url):
+                        redirects.append(
+                            f"{self._sanitize_download_url(str(response.url))} -> {self._sanitize_download_url(str(next_url))}"
+                        )
+                        raise RuntimeError(
+                            self._build_download_error(
+                                (
+                                    "Slack redirected attachment download to workspace root; "
+                                    "verify the bot token has files:read, reinstall the app after adding scopes, "
+                                    "and ensure the app is in the conversation"
+                                ),
+                                {
+                                    "final_url": str(next_url),
+                                    "status_code": response.status_code,
+                                    "content_type": response.headers.get("content-type"),
+                                    "content_length": response.headers.get("content-length"),
+                                    "redirects": redirects,
+                                },
+                            )
+                        )
                     redirects.append(
                         f"{self._sanitize_download_url(str(response.url))} -> {self._sanitize_download_url(str(next_url))}"
                     )

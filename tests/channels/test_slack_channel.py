@@ -551,6 +551,54 @@ async def test_download_slack_file_preserves_auth_across_slack_redirect(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_download_slack_file_rejects_redirect_to_workspace_root(monkeypatch) -> None:
+    import nanobot.channels.slack as slack_module
+
+    channel = SlackChannel(
+        SlackConfig(enabled=True, bot_token="xoxb-test", max_media_bytes=10_000),
+        MessageBus(),
+    )
+    calls: list[dict[str, object]] = []
+    responses = [
+        _FakeHTTPResponse(
+            url="https://files.slack.com/files-pri/T1-F123/report.pdf",
+            status_code=302,
+            headers={"location": "https://evoevo.slack.com/"},
+        )
+        for _ in range(4)
+    ]
+
+    monkeypatch.setattr(
+        slack_module.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: _FakeHTTPClient(responses, calls),
+    )
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(slack_module.asyncio, "sleep", _no_sleep)
+
+    path, marker, meta = await channel._download_slack_file(
+        {
+            "id": "F123",
+            "name": "report.pdf",
+            "mimetype": "application/pdf",
+            "size": 16,
+            "url_private_download": "https://files.slack.com/files-pri/T1-F123/report.pdf",
+        }
+    )
+
+    assert path is None
+    assert "Slack redirected attachment download to workspace root" in marker
+    assert "verify the bot token has files:read" in marker
+    assert "redirects=1" in marker
+    assert meta["path"] == ""
+    assert "Slack redirected attachment download to workspace root" in meta["error"]
+    assert meta["response_url"] == "https://files.slack.com/files-pri/T1-F123/report.pdf"
+
+
+@pytest.mark.asyncio
 async def test_download_slack_file_rejects_html_payload(monkeypatch) -> None:
     import nanobot.channels.slack as slack_module
 

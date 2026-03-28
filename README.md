@@ -691,6 +691,8 @@ DM the bot directly or @mention it in a channel — it should respond. User-uplo
 > - `groupPolicy`: `"mention"` (default — respond only when @mentioned), `"open"` (respond to all channel messages), or `"allowlist"` (restrict to specific channels).
 > - DM policy defaults to open. Set `"dm": {"enabled": false}` to disable DMs.
 > - `maxMediaBytes`: Max inbound attachment size (default `20MB`). Set `0` to block all inbound Slack media.
+> - After adding `files:read` or changing any Slack scopes, reinstall the app to the workspace so the bot token actually gets the new scopes.
+> - The app must be present in the DM/channel where the file is shared, otherwise Slack may redirect file downloads back to the workspace HTML page instead of returning file bytes.
 
 </details>
 
