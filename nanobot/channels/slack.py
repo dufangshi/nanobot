@@ -61,7 +61,8 @@ class SlackChannel(BaseChannel):
     _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
     _MAX_DOWNLOAD_REDIRECTS = 5
     _DOWNLOAD_RETRY_DELAYS = (0.5, 1.0, 2.0)
-    _DOWNLOAD_ERROR_LIMIT = 120
+    _DOWNLOAD_ERROR_LIMIT = 240
+    _DOWNLOAD_PREVIEW_LIMIT = 160
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -321,6 +322,52 @@ class SlackChannel(BaseChannel):
         return text
 
     @classmethod
+    def _sanitize_download_url(cls, url: str | None) -> str:
+        if not url:
+            return ""
+        try:
+            parsed = httpx.URL(url)
+            return str(parsed.copy_with(query=None, fragment=None))
+        except Exception:
+            return str(url).split("?", 1)[0].split("#", 1)[0]
+
+    @classmethod
+    def _body_preview(cls, raw: bytes) -> str:
+        text = raw[: cls._DOWNLOAD_PREVIEW_LIMIT].decode("utf-8", errors="replace")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    @classmethod
+    def _build_download_error(
+        cls,
+        base: str,
+        response_meta: dict[str, Any] | None = None,
+        raw: bytes | None = None,
+    ) -> str:
+        parts = [base]
+        meta = response_meta or {}
+        final_url = cls._sanitize_download_url(meta.get("final_url"))
+        if final_url:
+            parts.append(f"url={final_url}")
+        status_code = meta.get("status_code")
+        if status_code:
+            parts.append(f"status={status_code}")
+        content_type = meta.get("content_type")
+        if content_type:
+            parts.append(f"content-type={content_type}")
+        content_length = meta.get("content_length")
+        if content_length not in (None, ""):
+            parts.append(f"content-length={content_length}")
+        redirects = meta.get("redirects") or []
+        if redirects:
+            parts.append(f"redirects={len(redirects)}")
+        if raw:
+            preview = cls._body_preview(raw)
+            if preview:
+                parts.append(f"preview={preview}")
+        return " | ".join(parts)
+
+    @classmethod
     def _download_failure_marker(cls, filename: str, reason: str | None) -> str:
         return f"[attachment: {filename} - download failed: {cls._sanitize_download_error(reason)}]"
 
@@ -333,9 +380,10 @@ class SlackChannel(BaseChannel):
             or host.endswith(".slack-edge.com")
         )
 
-    async def _download_bytes_with_redirects(self, url: str) -> tuple[bytes, str | None]:
+    async def _download_bytes_with_redirects(self, url: str) -> tuple[bytes, dict[str, Any]]:
         headers = {"Authorization": f"Bearer {self.config.bot_token}"}
         current = url
+        redirects: list[str] = []
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
             for _ in range(self._MAX_DOWNLOAD_REDIRECTS + 1):
                 response = await client.get(current, headers=headers)
@@ -344,11 +392,35 @@ class SlackChannel(BaseChannel):
                     if not location:
                         raise RuntimeError("redirect missing location")
                     next_url = response.url.join(location)
+                    redirects.append(
+                        f"{self._sanitize_download_url(str(response.url))} -> {self._sanitize_download_url(str(next_url))}"
+                    )
                     current = str(next_url)
                     headers = headers if self._allows_auth_redirect(next_url) else {}
                     continue
-                response.raise_for_status()
-                return response.content, response.headers.get("content-type")
+                content_type = response.headers.get("content-type")
+                content_length = response.headers.get("content-length")
+                if response.status_code >= 400:
+                    raise RuntimeError(
+                        self._build_download_error(
+                            f"HTTP {response.status_code}",
+                            {
+                                "final_url": str(response.url),
+                                "status_code": response.status_code,
+                                "content_type": content_type,
+                                "content_length": content_length,
+                                "redirects": redirects,
+                            },
+                            response.content,
+                        )
+                    )
+                return response.content, {
+                    "final_url": str(response.url),
+                    "status_code": response.status_code,
+                    "content_type": content_type,
+                    "content_length": content_length,
+                    "redirects": redirects,
+                }
         raise RuntimeError("too many redirects")
 
     async def _resolve_file_object(self, file_obj: dict[str, Any]) -> dict[str, Any] | None:
@@ -397,6 +469,10 @@ class SlackChannel(BaseChannel):
             "download_url": file_obj.get("url_private") or file_obj.get("url_private_download") or "",
             "mode": mode,
             "error": "",
+            "response_url": "",
+            "response_content_type": "",
+            "response_content_length": "",
+            "redirects": [],
         }
         limit = max(int(self.config.max_media_bytes), 0)
         if limit == 0 or (size and size > limit):
@@ -419,17 +495,28 @@ class SlackChannel(BaseChannel):
         for attempt, delay in enumerate((0.0, *self._DOWNLOAD_RETRY_DELAYS), start=1):
             for url in urls:
                 try:
-                    raw, content_type = await self._download_bytes_with_redirects(url)
+                    raw, response_meta = await self._download_bytes_with_redirects(url)
+                    meta["response_url"] = self._sanitize_download_url(response_meta.get("final_url"))
+                    meta["response_content_type"] = response_meta.get("content_type") or ""
+                    meta["response_content_length"] = str(response_meta.get("content_length") or "")
+                    meta["redirects"] = list(response_meta.get("redirects") or [])
+                    content_type = response_meta.get("content_type")
                     if self._is_html_response(raw, content_type):
-                        raise RuntimeError("received HTML instead of file bytes")
+                        raise RuntimeError(
+                            self._build_download_error("received HTML instead of file bytes", response_meta, raw)
+                        )
                     if self._is_expected_pdf(file_obj, filename) and not self._is_valid_pdf(raw):
-                        raise RuntimeError("downloaded file is not a valid PDF")
+                        raise RuntimeError(
+                            self._build_download_error("downloaded file is not a valid PDF", response_meta, raw)
+                        )
                     file_path.write_bytes(raw)
                     meta["download_url"] = url
                     meta["path"] = str(file_path)
                     return str(file_path), f"[attachment: {file_path}]", meta
                 except Exception as e:
                     last_error = e
+                    if not meta["response_url"]:
+                        meta["response_url"] = self._sanitize_download_url(url)
                     logger.warning(
                         "Slack attachment download attempt {} failed for {} via {}: {}",
                         attempt,
@@ -479,6 +566,10 @@ class SlackChannel(BaseChannel):
                         "download_url": raw_file.get("url_private") or raw_file.get("url_private_download") or "",
                         "mode": self._attachment_mode(raw_file),
                         "error": error,
+                        "response_url": "",
+                        "response_content_type": "",
+                        "response_content_length": "",
+                        "redirects": [],
                     }
                 )
                 content_parts.append(self._download_failure_marker(fallback_name, error))

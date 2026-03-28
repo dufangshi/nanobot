@@ -287,6 +287,11 @@ async def test_file_share_message_downloads_attachment_and_passes_media(monkeypa
             "path": str(attachment_path),
             "download_url": "https://example.com/demo.txt",
             "mode": "file",
+            "error": "",
+            "response_url": "https://example.com/demo.txt",
+            "response_content_type": "text/plain",
+            "response_content_length": "5",
+            "redirects": [],
         }
 
     monkeypatch.setattr(channel, "_handle_message", _fake_handle_message)
@@ -342,6 +347,11 @@ async def test_check_file_info_fetches_full_file_before_download(monkeypatch, tm
             "path": str(attachment_path),
             "download_url": "https://example.com/resolved.txt",
             "mode": "file",
+            "error": "",
+            "response_url": "https://example.com/resolved.txt",
+            "response_content_type": "text/plain",
+            "response_content_length": "5",
+            "redirects": [],
         }
 
     monkeypatch.setattr(channel, "_handle_message", _fake_handle_message)
@@ -391,6 +401,11 @@ async def test_audio_attachment_adds_transcription(monkeypatch, tmp_path) -> Non
             "path": str(attachment_path),
             "download_url": "https://example.com/clip.mp3",
             "mode": "audio",
+            "error": "",
+            "response_url": "https://example.com/clip.mp3",
+            "response_content_type": "audio/mpeg",
+            "response_content_length": "5",
+            "redirects": [],
         }
 
     async def _fake_transcribe(_path):
@@ -443,6 +458,10 @@ async def test_file_download_failure_still_forwards_message(monkeypatch) -> None
             "download_url": "https://example.com/broken.txt",
             "mode": "file",
             "error": "HTTP 403",
+            "response_url": "https://example.com/broken.txt",
+            "response_content_type": "text/plain",
+            "response_content_length": "0",
+            "redirects": [],
         }
 
     monkeypatch.setattr(channel, "_handle_message", _fake_handle_message)
@@ -572,9 +591,13 @@ async def test_download_slack_file_rejects_html_payload(monkeypatch) -> None:
     )
 
     assert path is None
-    assert marker == "[attachment: report.pdf - download failed: received HTML instead of file bytes]"
+    assert "received HTML instead of file bytes" in marker
+    assert "content-type=text/html; charset=utf-8" in marker
+    assert "url=https://files.slack.com/files-pri/T1-F123/report.pdf" in marker
     assert meta["path"] == ""
-    assert meta["error"] == "received HTML instead of file bytes"
+    assert "received HTML instead of file bytes" in meta["error"]
+    assert meta["response_url"] == "https://files.slack.com/files-pri/T1-F123/report.pdf"
+    assert meta["response_content_type"] == "text/html; charset=utf-8"
 
 
 @pytest.mark.asyncio
@@ -624,6 +647,8 @@ async def test_download_slack_file_falls_back_to_download_url_when_primary_is_ht
     assert calls[0]["url"] == "https://files.slack.com/files-pri/T1-F123/report.pdf"
     assert calls[1]["url"] == "https://downloads.slack.com/files-pri/T1-F123/report.pdf"
     assert meta["download_url"] == "https://downloads.slack.com/files-pri/T1-F123/report.pdf"
+    assert meta["response_url"] == "https://downloads.slack.com/files-pri/T1-F123/report.pdf"
+    assert meta["response_content_type"] == "application/pdf"
 
 
 @pytest.mark.asyncio
@@ -676,6 +701,8 @@ async def test_download_slack_file_retries_after_initial_html_response(monkeypat
     assert marker is not None and "attachment" in marker
     assert len(calls) == 2
     assert meta["path"] == path
+    assert meta["response_url"] == "https://files.slack.com/files-pri/T1-F123/report.pdf"
+    assert meta["response_content_type"] == "application/pdf"
 
 
 @pytest.mark.asyncio
@@ -718,9 +745,12 @@ async def test_download_slack_file_rejects_non_pdf_payload_for_pdf(monkeypatch) 
     )
 
     assert path is None
-    assert marker == "[attachment: report.pdf - download failed: downloaded file is not a valid PDF]"
+    assert "downloaded file is not a valid PDF" in marker
+    assert "content-type=application/octet-stream" in marker
+    assert "preview=not actually a pdf" in marker
     assert meta["path"] == ""
-    assert meta["error"] == "downloaded file is not a valid PDF"
+    assert "downloaded file is not a valid PDF" in meta["error"]
+    assert meta["response_content_type"] == "application/octet-stream"
 
 
 @pytest.mark.asyncio
@@ -762,9 +792,11 @@ async def test_download_slack_file_surfaces_http_error(monkeypatch) -> None:
     )
 
     assert path is None
-    assert marker == "[attachment: report.pdf - download failed: HTTP 403]"
+    assert "HTTP 403" in marker
+    assert "url=https://files.slack.com/files-pri/T1-F123/report.pdf" in marker
     assert meta["path"] == ""
-    assert meta["error"] == "HTTP 403"
+    assert "HTTP 403" in meta["error"]
+    assert meta["response_url"] == "https://files.slack.com/files-pri/T1-F123/report.pdf"
 
 
 @pytest.mark.asyncio
