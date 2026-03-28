@@ -57,7 +57,9 @@ class SlackChannel(BaseChannel):
     _SUPPORTED_MESSAGE_SUBTYPES = {None, "file_share"}
     _IMAGE_PREFIX = "image/"
     _AUDIO_PREFIX = "audio/"
+    _PDF_MIME = "application/pdf"
     _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+    _MAX_DOWNLOAD_REDIRECTS = 5
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -286,6 +288,48 @@ class SlackChannel(BaseChannel):
             return "audio"
         return "file"
 
+    @staticmethod
+    def _is_html_response(raw: bytes, content_type: str | None) -> bool:
+        ctype = (content_type or "").lower()
+        if "text/html" in ctype or "application/xhtml+xml" in ctype:
+            return True
+        prefix = raw.lstrip()[:256].lower()
+        return prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html")
+
+    @staticmethod
+    def _is_expected_pdf(file_obj: dict[str, Any], filename: str) -> bool:
+        mimetype = str(file_obj.get("mimetype") or "").lower()
+        if mimetype == SlackChannel._PDF_MIME:
+            return True
+        return filename.lower().endswith(".pdf")
+
+    @staticmethod
+    def _is_valid_pdf(raw: bytes) -> bool:
+        return raw.startswith(b"%PDF-")
+
+    @staticmethod
+    def _allows_auth_redirect(url: httpx.URL) -> bool:
+        host = (url.host or "").lower()
+        return host == "slack.com" or host.endswith(".slack.com")
+
+    async def _download_bytes_with_redirects(self, url: str) -> tuple[bytes, str | None]:
+        headers = {"Authorization": f"Bearer {self.config.bot_token}"}
+        current = url
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+            for _ in range(self._MAX_DOWNLOAD_REDIRECTS + 1):
+                response = await client.get(current, headers=headers)
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise RuntimeError("redirect missing location")
+                    next_url = response.url.join(location)
+                    current = str(next_url)
+                    headers = headers if self._allows_auth_redirect(next_url) else {}
+                    continue
+                response.raise_for_status()
+                return response.content, response.headers.get("content-type")
+        raise RuntimeError("too many redirects")
+
     async def _resolve_file_object(self, file_obj: dict[str, Any]) -> dict[str, Any] | None:
         if not self._web_client:
             return file_obj
@@ -336,14 +380,12 @@ class SlackChannel(BaseChannel):
         file_path = media_dir / local_name
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.get(
-                    url,
-                    headers={"Authorization": f"Bearer {self.config.bot_token}"},
-                    follow_redirects=True,
-                )
-                response.raise_for_status()
-                file_path.write_bytes(response.content)
+            raw, content_type = await self._download_bytes_with_redirects(url)
+            if self._is_html_response(raw, content_type):
+                raise RuntimeError("received HTML instead of file bytes")
+            if self._is_expected_pdf(file_obj, filename) and not self._is_valid_pdf(raw):
+                raise RuntimeError("downloaded file is not a valid PDF")
+            file_path.write_bytes(raw)
         except Exception as e:
             logger.warning("Failed to download Slack attachment {}: {}", file_id or filename, e)
             return None, f"[attachment: {filename} - download failed]", meta
