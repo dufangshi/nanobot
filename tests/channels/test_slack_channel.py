@@ -433,7 +433,7 @@ async def test_file_download_failure_still_forwards_message(monkeypatch) -> None
         handled.append(kwargs)
 
     async def _fake_download(file_obj):
-        return None, "[attachment: broken.txt - download failed]", {
+        return None, "[attachment: broken.txt - download failed: HTTP 403]", {
             "id": file_obj.get("id"),
             "name": "broken.txt",
             "title": "",
@@ -442,6 +442,7 @@ async def test_file_download_failure_still_forwards_message(monkeypatch) -> None
             "path": "",
             "download_url": "https://example.com/broken.txt",
             "mode": "file",
+            "error": "HTTP 403",
         }
 
     monkeypatch.setattr(channel, "_handle_message", _fake_handle_message)
@@ -463,7 +464,7 @@ async def test_file_download_failure_still_forwards_message(monkeypatch) -> None
 
     assert len(handled) == 1
     assert handled[0]["media"] == []
-    assert "[attachment: broken.txt - download failed]" in handled[0]["content"]
+    assert "[attachment: broken.txt - download failed: HTTP 403]" in handled[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -544,7 +545,8 @@ async def test_download_slack_file_rejects_html_payload(monkeypatch) -> None:
             status_code=200,
             headers={"content-type": "text/html; charset=utf-8"},
             content=b"<!DOCTYPE html><html lang='en-US'><head></head><body>login</body></html>",
-        ),
+        )
+        for _ in range(4)
     ]
     calls: list[dict[str, object]] = []
     queue = list(responses)
@@ -554,6 +556,10 @@ async def test_download_slack_file_rejects_html_payload(monkeypatch) -> None:
         "AsyncClient",
         lambda *args, **kwargs: _FakeHTTPClient(queue, calls),
     )
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(slack_module.asyncio, "sleep", _no_sleep)
 
     path, marker, meta = await channel._download_slack_file(
         {
@@ -566,8 +572,9 @@ async def test_download_slack_file_rejects_html_payload(monkeypatch) -> None:
     )
 
     assert path is None
-    assert marker == "[attachment: report.pdf - download failed]"
+    assert marker == "[attachment: report.pdf - download failed: received HTML instead of file bytes]"
     assert meta["path"] == ""
+    assert meta["error"] == "received HTML instead of file bytes"
 
 
 @pytest.mark.asyncio
@@ -685,7 +692,8 @@ async def test_download_slack_file_rejects_non_pdf_payload_for_pdf(monkeypatch) 
             status_code=200,
             headers={"content-type": "application/octet-stream"},
             content=b"not actually a pdf",
-        ),
+        )
+        for _ in range(4)
     ]
     calls: list[dict[str, object]] = []
 
@@ -694,6 +702,10 @@ async def test_download_slack_file_rejects_non_pdf_payload_for_pdf(monkeypatch) 
         "AsyncClient",
         lambda *args, **kwargs: _FakeHTTPClient(responses, calls),
     )
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(slack_module.asyncio, "sleep", _no_sleep)
 
     path, marker, meta = await channel._download_slack_file(
         {
@@ -706,5 +718,85 @@ async def test_download_slack_file_rejects_non_pdf_payload_for_pdf(monkeypatch) 
     )
 
     assert path is None
-    assert marker == "[attachment: report.pdf - download failed]"
+    assert marker == "[attachment: report.pdf - download failed: downloaded file is not a valid PDF]"
     assert meta["path"] == ""
+    assert meta["error"] == "downloaded file is not a valid PDF"
+
+
+@pytest.mark.asyncio
+async def test_download_slack_file_surfaces_http_error(monkeypatch) -> None:
+    import nanobot.channels.slack as slack_module
+
+    channel = SlackChannel(
+        SlackConfig(enabled=True, bot_token="xoxb-test", max_media_bytes=10_000),
+        MessageBus(),
+    )
+    responses = [
+        _FakeHTTPResponse(
+            url="https://files.slack.com/files-pri/T1-F123/report.pdf",
+            status_code=403,
+        )
+        for _ in range(4)
+    ]
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        slack_module.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: _FakeHTTPClient(responses, calls),
+    )
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(slack_module.asyncio, "sleep", _no_sleep)
+
+    path, marker, meta = await channel._download_slack_file(
+        {
+            "id": "F123",
+            "name": "report.pdf",
+            "mimetype": "application/pdf",
+            "size": 18,
+            "url_private_download": "https://files.slack.com/files-pri/T1-F123/report.pdf",
+        }
+    )
+
+    assert path is None
+    assert marker == "[attachment: report.pdf - download failed: HTTP 403]"
+    assert meta["path"] == ""
+    assert meta["error"] == "HTTP 403"
+
+
+@pytest.mark.asyncio
+async def test_check_file_info_failure_surfaces_reason(monkeypatch) -> None:
+    channel = SlackChannel(SlackConfig(enabled=True, group_policy="open", allow_from=["*"]), MessageBus())
+    fake_web = _FakeAsyncWebClient()
+    fake_socket = _FakeSocketClient()
+    handled: list[dict[str, object]] = []
+
+    channel._web_client = fake_web
+    channel._bot_user_id = "B123"
+
+    async def _fake_handle_message(**kwargs):
+        handled.append(kwargs)
+
+    monkeypatch.setattr(channel, "_handle_message", _fake_handle_message)
+
+    payload = {
+        "event": {
+            "type": "message",
+            "subtype": "file_share",
+            "user": "U123",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "please inspect",
+            "ts": "1700000000.000100",
+            "files": [{"id": "F123", "name": "report.pdf", "file_access": "check_file_info"}],
+        }
+    }
+    await channel._on_socket_request(fake_socket, _FakeSocketRequest(payload))
+
+    assert len(handled) == 1
+    assert handled[0]["media"] == []
+    assert "[attachment: report.pdf - download failed: files.info returned no file payload]" in handled[0]["content"]
+    assert handled[0]["metadata"]["attachments"][0]["error"] == "files.info returned no file payload"

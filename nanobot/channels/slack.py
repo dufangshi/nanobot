@@ -61,6 +61,7 @@ class SlackChannel(BaseChannel):
     _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
     _MAX_DOWNLOAD_REDIRECTS = 5
     _DOWNLOAD_RETRY_DELAYS = (0.5, 1.0, 2.0)
+    _DOWNLOAD_ERROR_LIMIT = 120
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -308,6 +309,21 @@ class SlackChannel(BaseChannel):
     def _is_valid_pdf(raw: bytes) -> bool:
         return raw.startswith(b"%PDF-")
 
+    @classmethod
+    def _sanitize_download_error(cls, reason: str | None) -> str:
+        text = re.sub(r"\s+", " ", str(reason or "")).strip()
+        if not text:
+            return "unknown error"
+        text = re.sub(r"Bearer\s+[A-Za-z0-9._-]+", "Bearer [redacted]", text, flags=re.IGNORECASE)
+        text = re.sub(r"xox[a-z]-[A-Za-z0-9-]+", "[redacted-slack-token]", text, flags=re.IGNORECASE)
+        if len(text) > cls._DOWNLOAD_ERROR_LIMIT:
+            text = text[: cls._DOWNLOAD_ERROR_LIMIT - 3].rstrip() + "..."
+        return text
+
+    @classmethod
+    def _download_failure_marker(cls, filename: str, reason: str | None) -> str:
+        return f"[attachment: {filename} - download failed: {cls._sanitize_download_error(reason)}]"
+
     @staticmethod
     def _allows_auth_redirect(url: httpx.URL) -> bool:
         host = (url.host or "").lower()
@@ -336,20 +352,29 @@ class SlackChannel(BaseChannel):
         raise RuntimeError("too many redirects")
 
     async def _resolve_file_object(self, file_obj: dict[str, Any]) -> dict[str, Any] | None:
+        resolved, _ = await self._resolve_file_object_with_error(file_obj)
+        return resolved
+
+    async def _resolve_file_object_with_error(
+        self,
+        file_obj: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str | None]:
         if not self._web_client:
-            return file_obj
+            return file_obj, None
         if file_obj.get("file_access") != "check_file_info":
-            return file_obj
+            return file_obj, None
         file_id = file_obj.get("id")
         if not file_id:
-            return None
+            return None, "missing Slack file id"
         try:
             resp = await self._web_client.files_info(file=file_id)
         except Exception as e:
             logger.warning("Slack files.info failed for {}: {}", file_id, e)
-            return None
+            return None, f"files.info failed: {e}"
         resolved = resp.get("file") if isinstance(resp, dict) else None
-        return resolved if isinstance(resolved, dict) else None
+        if isinstance(resolved, dict):
+            return resolved, None
+        return None, "files.info returned no file payload"
 
     async def _download_slack_file(
         self,
@@ -371,6 +396,7 @@ class SlackChannel(BaseChannel):
             "path": "",
             "download_url": file_obj.get("url_private") or file_obj.get("url_private_download") or "",
             "mode": mode,
+            "error": "",
         }
         limit = max(int(self.config.max_media_bytes), 0)
         if limit == 0 or (size and size > limit):
@@ -381,7 +407,9 @@ class SlackChannel(BaseChannel):
             if isinstance(candidate, str) and candidate and candidate not in urls:
                 urls.append(candidate)
         if not urls or not self.config.bot_token:
-            return None, f"[attachment: {filename} - download failed]", meta
+            reason = "missing Slack file download URL" if not urls else "missing Slack bot token"
+            meta["error"] = self._sanitize_download_error(reason)
+            return None, self._download_failure_marker(filename, reason), meta
 
         media_dir = get_media_dir("slack")
         local_name = self._safe_filename(f"{file_id}_{filename}" if file_id else filename, filename)
@@ -422,7 +450,8 @@ class SlackChannel(BaseChannel):
 
         if last_error is not None:
             logger.warning("Failed to download Slack attachment {}: {}", file_id or filename, last_error)
-        return None, f"[attachment: {filename} - download failed]", meta
+        meta["error"] = self._sanitize_download_error(str(last_error) if last_error else None)
+        return None, self._download_failure_marker(filename, meta["error"]), meta
 
     async def _collect_inbound_media(
         self,
@@ -435,10 +464,24 @@ class SlackChannel(BaseChannel):
         for raw_file in event.get("files") or []:
             if not isinstance(raw_file, dict):
                 continue
-            file_obj = await self._resolve_file_object(raw_file)
+            file_obj, resolve_error = await self._resolve_file_object_with_error(raw_file)
             if not file_obj:
                 fallback_name = self._safe_filename(str(raw_file.get("name") or ""), "attachment")
-                content_parts.append(f"[attachment: {fallback_name} - download failed]")
+                error = self._sanitize_download_error(resolve_error or "unable to resolve Slack file metadata")
+                attachments_meta.append(
+                    {
+                        "id": str(raw_file.get("id") or ""),
+                        "name": raw_file.get("name") or fallback_name,
+                        "title": raw_file.get("title") or "",
+                        "mimetype": raw_file.get("mimetype") or "",
+                        "size": int(raw_file.get("size") or 0),
+                        "path": "",
+                        "download_url": raw_file.get("url_private") or raw_file.get("url_private_download") or "",
+                        "mode": self._attachment_mode(raw_file),
+                        "error": error,
+                    }
+                )
+                content_parts.append(self._download_failure_marker(fallback_name, error))
                 continue
 
             path, marker, meta = await self._download_slack_file(file_obj)
