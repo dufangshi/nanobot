@@ -58,6 +58,7 @@ class SlackChannel(BaseChannel):
     _IMAGE_PREFIX = "image/"
     _AUDIO_PREFIX = "audio/"
     _PDF_MIME = "application/pdf"
+    _AUDIO_EXTS = {".aac", ".amr", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".webm"}
     _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
     _MAX_DOWNLOAD_REDIRECTS = 5
     _DOWNLOAD_RETRY_DELAYS = (0.5, 1.0, 2.0)
@@ -289,6 +290,13 @@ class SlackChannel(BaseChannel):
             return "image"
         if mimetype.startswith(cls._AUDIO_PREFIX):
             return "audio"
+        filetype = str(file_obj.get("filetype") or "").lower().strip()
+        if filetype and f".{filetype.lstrip('.')}" in cls._AUDIO_EXTS:
+            return "audio"
+        for candidate in (file_obj.get("name"), file_obj.get("title")):
+            suffix = Path(str(candidate or "")).suffix.lower()
+            if suffix in cls._AUDIO_EXTS:
+                return "audio"
         return "file"
 
     @staticmethod

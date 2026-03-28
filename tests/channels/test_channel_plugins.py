@@ -192,6 +192,36 @@ async def test_manager_loads_plugin_from_dict_config():
     assert isinstance(mgr.channels["fakeplugin"], _FakePlugin)
 
 
+@pytest.mark.asyncio
+async def test_manager_uses_openai_for_transcription_when_groq_missing():
+    fake_config = SimpleNamespace(
+        channels=ChannelsConfig.model_validate({
+            "fakeplugin": {"enabled": True, "allowFrom": ["*"]},
+        }),
+        providers=SimpleNamespace(
+            groq=SimpleNamespace(api_key=""),
+            openai=SimpleNamespace(api_key="sk-openai-test", api_base="https://api.openai.com/v1"),
+        ),
+    )
+
+    with patch(
+        "nanobot.channels.registry.discover_all",
+        return_value={"fakeplugin": _FakePlugin},
+    ):
+        mgr = ChannelManager.__new__(ChannelManager)
+        mgr.config = fake_config
+        mgr.bus = MessageBus()
+        mgr.channels = {}
+        mgr._dispatch_task = None
+        mgr._init_channels()
+
+    channel = mgr.channels["fakeplugin"]
+    assert channel.transcription_provider == "openai"
+    assert channel.transcription_api_key == "sk-openai-test"
+    assert channel.transcription_api_base == "https://api.openai.com/v1"
+    assert channel.transcription_model == "gpt-4o-mini-transcribe"
+
+
 def test_channels_login_uses_discovered_plugin_class(monkeypatch):
     from nanobot.cli.commands import app
     from nanobot.config.schema import Config
@@ -877,4 +907,3 @@ async def test_start_all_creates_dispatch_task():
 
     # Dispatch task should have been created
     assert mgr._dispatch_task is not None
-

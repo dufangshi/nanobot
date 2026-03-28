@@ -435,6 +435,65 @@ async def test_audio_attachment_adds_transcription(monkeypatch, tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_audio_attachment_detects_m4a_by_extension(monkeypatch, tmp_path) -> None:
+    channel = SlackChannel(SlackConfig(enabled=True, group_policy="open", allow_from=["*"]), MessageBus())
+    fake_web = _FakeAsyncWebClient()
+    fake_socket = _FakeSocketClient()
+    handled: list[dict[str, object]] = []
+    attachment_path = tmp_path / "clip.m4a"
+    attachment_path.write_bytes(b"audio")
+
+    channel._web_client = fake_web
+    channel._bot_user_id = "B123"
+
+    async def _fake_handle_message(**kwargs):
+        handled.append(kwargs)
+
+    async def _fake_download(file_obj):
+        assert channel._attachment_mode(file_obj) == "audio"
+        return str(attachment_path), f"[attachment: {attachment_path}]", {
+            "id": file_obj.get("id"),
+            "name": file_obj.get("name"),
+            "title": "",
+            "mimetype": file_obj.get("mimetype") or "application/octet-stream",
+            "size": 5,
+            "path": str(attachment_path),
+            "download_url": "https://example.com/clip.m4a",
+            "mode": "audio",
+            "error": "",
+            "response_url": "https://example.com/clip.m4a",
+            "response_content_type": "application/octet-stream",
+            "response_content_length": "5",
+            "redirects": [],
+        }
+
+    async def _fake_transcribe(_path):
+        return "voice memo"
+
+    monkeypatch.setattr(channel, "_handle_message", _fake_handle_message)
+    monkeypatch.setattr(channel, "_download_slack_file", _fake_download)
+    monkeypatch.setattr(channel, "transcribe_audio", _fake_transcribe)
+
+    payload = {
+        "event": {
+            "type": "message",
+            "subtype": "file_share",
+            "user": "U123",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "voice note",
+            "ts": "1700000000.000100",
+            "files": [{"id": "F123", "name": "clip.m4a", "mimetype": "application/octet-stream", "size": 5}],
+        }
+    }
+    await channel._on_socket_request(fake_socket, _FakeSocketRequest(payload))
+
+    assert len(handled) == 1
+    assert "[attachment: " in handled[0]["content"]
+    assert "[transcription: voice memo]" in handled[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_file_download_failure_still_forwards_message(monkeypatch) -> None:
     channel = SlackChannel(SlackConfig(enabled=True, group_policy="open", allow_from=["*"]), MessageBus())
     fake_web = _FakeAsyncWebClient()

@@ -38,7 +38,11 @@ class ChannelManager:
         """Initialize channels discovered via pkgutil scan + entry_points plugins."""
         from nanobot.channels.registry import discover_all
 
-        groq_key = self.config.providers.groq.api_key
+        groq_provider = getattr(self.config.providers, "groq", None)
+        openai_provider = getattr(self.config.providers, "openai", None)
+        groq_key = groq_provider.api_key if groq_provider else ""
+        openai_key = openai_provider.api_key if openai_provider else ""
+        openai_base = openai_provider.api_base if openai_provider else None
 
         for name, cls in discover_all().items():
             section = getattr(self.config.channels, name, None)
@@ -53,7 +57,16 @@ class ChannelManager:
                 continue
             try:
                 channel = cls(section, self.bus)
-                channel.transcription_api_key = groq_key
+                if groq_key:
+                    channel.transcription_provider = "groq"
+                    channel.transcription_api_key = groq_key
+                    channel.transcription_api_base = None
+                    channel.transcription_model = ""
+                elif openai_key:
+                    channel.transcription_provider = "openai"
+                    channel.transcription_api_key = openai_key
+                    channel.transcription_api_base = openai_base
+                    channel.transcription_model = "gpt-4o-mini-transcribe"
                 self.channels[name] = channel
                 logger.info("{} channel enabled", cls.display_name)
             except Exception as e:
