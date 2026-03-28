@@ -130,7 +130,7 @@ class _FakeHTTPResponse:
 
 class _FakeHTTPClient:
     def __init__(self, responses: list[_FakeHTTPResponse], calls: list[dict[str, object]]) -> None:
-        self._responses = list(responses)
+        self._responses = responses
         self._calls = calls
 
     async def __aenter__(self):
@@ -527,6 +527,7 @@ async def test_download_slack_file_preserves_auth_across_slack_redirect(monkeypa
     assert calls[0]["headers"] == {"Authorization": "Bearer xoxb-test"}
     assert calls[1]["headers"] == {"Authorization": "Bearer xoxb-test"}
     assert meta["path"] == path
+    assert calls[0]["url"] == "https://files.slack.com/files-pri/T1-F123/report.pdf"
 
 
 @pytest.mark.asyncio
@@ -546,11 +547,12 @@ async def test_download_slack_file_rejects_html_payload(monkeypatch) -> None:
         ),
     ]
     calls: list[dict[str, object]] = []
+    queue = list(responses)
 
     monkeypatch.setattr(
         slack_module.httpx,
         "AsyncClient",
-        lambda *args, **kwargs: _FakeHTTPClient(responses, calls),
+        lambda *args, **kwargs: _FakeHTTPClient(queue, calls),
     )
 
     path, marker, meta = await channel._download_slack_file(
@@ -566,6 +568,55 @@ async def test_download_slack_file_rejects_html_payload(monkeypatch) -> None:
     assert path is None
     assert marker == "[attachment: report.pdf - download failed]"
     assert meta["path"] == ""
+
+
+@pytest.mark.asyncio
+async def test_download_slack_file_falls_back_to_download_url_when_primary_is_html(monkeypatch) -> None:
+    import nanobot.channels.slack as slack_module
+
+    channel = SlackChannel(
+        SlackConfig(enabled=True, bot_token="xoxb-test", max_media_bytes=10_000),
+        MessageBus(),
+    )
+    responses = [
+        _FakeHTTPResponse(
+            url="https://files.slack.com/files-pri/T1-F123/report.pdf",
+            status_code=200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            content=b"<!DOCTYPE html><html><body>auth page</body></html>",
+        ),
+        _FakeHTTPResponse(
+            url="https://downloads.slack.com/files-pri/T1-F123/report.pdf",
+            status_code=200,
+            headers={"content-type": "application/pdf"},
+            content=b"%PDF-1.7\nreal pdf",
+        ),
+    ]
+    calls: list[dict[str, object]] = []
+    queue = list(responses)
+
+    monkeypatch.setattr(
+        slack_module.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: _FakeHTTPClient(queue, calls),
+    )
+
+    path, marker, meta = await channel._download_slack_file(
+        {
+            "id": "F123",
+            "name": "report.pdf",
+            "mimetype": "application/pdf",
+            "size": 64,
+            "url_private": "https://files.slack.com/files-pri/T1-F123/report.pdf",
+            "url_private_download": "https://downloads.slack.com/files-pri/T1-F123/report.pdf",
+        }
+    )
+
+    assert path is not None
+    assert marker is not None and "attachment" in marker
+    assert calls[0]["url"] == "https://files.slack.com/files-pri/T1-F123/report.pdf"
+    assert calls[1]["url"] == "https://downloads.slack.com/files-pri/T1-F123/report.pdf"
+    assert meta["download_url"] == "https://downloads.slack.com/files-pri/T1-F123/report.pdf"
 
 
 @pytest.mark.asyncio

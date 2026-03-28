@@ -364,34 +364,48 @@ class SlackChannel(BaseChannel):
             "mimetype": file_obj.get("mimetype") or "",
             "size": size,
             "path": "",
-            "download_url": file_obj.get("url_private_download") or file_obj.get("url_private") or "",
+            "download_url": file_obj.get("url_private") or file_obj.get("url_private_download") or "",
             "mode": mode,
         }
         limit = max(int(self.config.max_media_bytes), 0)
         if limit == 0 or (size and size > limit):
             return None, f"[attachment: {filename} - too large]", meta
 
-        url = meta["download_url"]
-        if not url or not self.config.bot_token:
+        urls = []
+        for candidate in (file_obj.get("url_private"), file_obj.get("url_private_download")):
+            if isinstance(candidate, str) and candidate and candidate not in urls:
+                urls.append(candidate)
+        if not urls or not self.config.bot_token:
             return None, f"[attachment: {filename} - download failed]", meta
 
         media_dir = get_media_dir("slack")
         local_name = self._safe_filename(f"{file_id}_{filename}" if file_id else filename, filename)
         file_path = media_dir / local_name
 
-        try:
-            raw, content_type = await self._download_bytes_with_redirects(url)
-            if self._is_html_response(raw, content_type):
-                raise RuntimeError("received HTML instead of file bytes")
-            if self._is_expected_pdf(file_obj, filename) and not self._is_valid_pdf(raw):
-                raise RuntimeError("downloaded file is not a valid PDF")
-            file_path.write_bytes(raw)
-        except Exception as e:
-            logger.warning("Failed to download Slack attachment {}: {}", file_id or filename, e)
-            return None, f"[attachment: {filename} - download failed]", meta
+        last_error: Exception | None = None
+        for url in urls:
+            try:
+                raw, content_type = await self._download_bytes_with_redirects(url)
+                if self._is_html_response(raw, content_type):
+                    raise RuntimeError("received HTML instead of file bytes")
+                if self._is_expected_pdf(file_obj, filename) and not self._is_valid_pdf(raw):
+                    raise RuntimeError("downloaded file is not a valid PDF")
+                file_path.write_bytes(raw)
+                meta["download_url"] = url
+                meta["path"] = str(file_path)
+                return str(file_path), f"[attachment: {file_path}]", meta
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Slack attachment download attempt failed for {} via {}: {}",
+                    file_id or filename,
+                    url,
+                    e,
+                )
 
-        meta["path"] = str(file_path)
-        return str(file_path), f"[attachment: {file_path}]", meta
+        if last_error is not None:
+            logger.warning("Failed to download Slack attachment {}: {}", file_id or filename, last_error)
+        return None, f"[attachment: {filename} - download failed]", meta
 
     async def _collect_inbound_media(
         self,
