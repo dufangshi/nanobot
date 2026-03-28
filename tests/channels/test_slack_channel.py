@@ -620,6 +620,58 @@ async def test_download_slack_file_falls_back_to_download_url_when_primary_is_ht
 
 
 @pytest.mark.asyncio
+async def test_download_slack_file_retries_after_initial_html_response(monkeypatch) -> None:
+    import nanobot.channels.slack as slack_module
+
+    channel = SlackChannel(
+        SlackConfig(enabled=True, bot_token="xoxb-test", max_media_bytes=10_000),
+        MessageBus(),
+    )
+    responses = [
+        _FakeHTTPResponse(
+            url="https://files.slack.com/files-pri/T1-F123/report.pdf",
+            status_code=200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            content=b"<!DOCTYPE html><html><body>not ready</body></html>",
+        ),
+        _FakeHTTPResponse(
+            url="https://files.slack.com/files-pri/T1-F123/report.pdf",
+            status_code=200,
+            headers={"content-type": "application/pdf"},
+            content=b"%PDF-1.7\nready now",
+        ),
+    ]
+    calls: list[dict[str, object]] = []
+    queue = list(responses)
+
+    monkeypatch.setattr(
+        slack_module.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: _FakeHTTPClient(queue, calls),
+    )
+
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(slack_module.asyncio, "sleep", _no_sleep)
+
+    path, marker, meta = await channel._download_slack_file(
+        {
+            "id": "F123",
+            "name": "report.pdf",
+            "mimetype": "application/pdf",
+            "size": 64,
+            "url_private": "https://files.slack.com/files-pri/T1-F123/report.pdf",
+        }
+    )
+
+    assert path is not None
+    assert marker is not None and "attachment" in marker
+    assert len(calls) == 2
+    assert meta["path"] == path
+
+
+@pytest.mark.asyncio
 async def test_download_slack_file_rejects_non_pdf_payload_for_pdf(monkeypatch) -> None:
     import nanobot.channels.slack as slack_module
 

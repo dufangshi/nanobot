@@ -60,6 +60,7 @@ class SlackChannel(BaseChannel):
     _PDF_MIME = "application/pdf"
     _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
     _MAX_DOWNLOAD_REDIRECTS = 5
+    _DOWNLOAD_RETRY_DELAYS = (0.5, 1.0, 2.0)
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:
@@ -310,7 +311,11 @@ class SlackChannel(BaseChannel):
     @staticmethod
     def _allows_auth_redirect(url: httpx.URL) -> bool:
         host = (url.host or "").lower()
-        return host == "slack.com" or host.endswith(".slack.com")
+        return (
+            host == "slack.com"
+            or host.endswith(".slack.com")
+            or host.endswith(".slack-edge.com")
+        )
 
     async def _download_bytes_with_redirects(self, url: str) -> tuple[bytes, str | None]:
         headers = {"Authorization": f"Bearer {self.config.bot_token}"}
@@ -383,25 +388,37 @@ class SlackChannel(BaseChannel):
         file_path = media_dir / local_name
 
         last_error: Exception | None = None
-        for url in urls:
-            try:
-                raw, content_type = await self._download_bytes_with_redirects(url)
-                if self._is_html_response(raw, content_type):
-                    raise RuntimeError("received HTML instead of file bytes")
-                if self._is_expected_pdf(file_obj, filename) and not self._is_valid_pdf(raw):
-                    raise RuntimeError("downloaded file is not a valid PDF")
-                file_path.write_bytes(raw)
-                meta["download_url"] = url
-                meta["path"] = str(file_path)
-                return str(file_path), f"[attachment: {file_path}]", meta
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    "Slack attachment download attempt failed for {} via {}: {}",
-                    file_id or filename,
-                    url,
-                    e,
-                )
+        for attempt, delay in enumerate((0.0, *self._DOWNLOAD_RETRY_DELAYS), start=1):
+            for url in urls:
+                try:
+                    raw, content_type = await self._download_bytes_with_redirects(url)
+                    if self._is_html_response(raw, content_type):
+                        raise RuntimeError("received HTML instead of file bytes")
+                    if self._is_expected_pdf(file_obj, filename) and not self._is_valid_pdf(raw):
+                        raise RuntimeError("downloaded file is not a valid PDF")
+                    file_path.write_bytes(raw)
+                    meta["download_url"] = url
+                    meta["path"] = str(file_path)
+                    return str(file_path), f"[attachment: {file_path}]", meta
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        "Slack attachment download attempt {} failed for {} via {}: {}",
+                        attempt,
+                        file_id or filename,
+                        url,
+                        e,
+                    )
+            if delay > 0:
+                await asyncio.sleep(delay)
+                if self._web_client and file_id:
+                    refreshed = await self._resolve_file_object({"id": file_id, "file_access": "check_file_info"})
+                    if refreshed:
+                        file_obj = refreshed
+                        urls = []
+                        for candidate in (file_obj.get("url_private"), file_obj.get("url_private_download")):
+                            if isinstance(candidate, str) and candidate and candidate not in urls:
+                                urls.append(candidate)
 
         if last_error is not None:
             logger.warning("Failed to download Slack attachment {}: {}", file_id or filename, last_error)
