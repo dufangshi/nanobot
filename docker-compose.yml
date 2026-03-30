@@ -24,6 +24,14 @@ services:
     <<: *common-config
     command: ["gateway"]
     restart: unless-stopped
+    volumes:
+      - ~/.nanobot:/root/.nanobot
+      - ~/.codex:/root/.codex
+      - ~/.local:/root/.local
+      - /mnt/gdrive-ai:/mnt/gdrive-ai:rw
+      - /mnt/gdrive-ai:/home/ubuntu/mnt/gdrive-ai:rw
+      - /opt/orchestration-mcp:/opt/orchestration-mcp:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - 18790:18790
     deploy:
